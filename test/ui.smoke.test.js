@@ -799,3 +799,176 @@ test('入场口令：编辑走位即时重算状态，且随快照保存并在�
   assert.equal(doc.querySelectorAll('.cue-row').length, 1);
   dom.window.close();
 });
+
+// ---------- 道具交接时窗 ----------
+
+test('道具交接：启动即渲染样例交接区、结果时窗，点击时窗跳转播放头', async () => {
+  const dom = await boot();
+  const { window } = dom;
+  const doc = window.document;
+
+  // 画布上有 1 个交接区（由样例载入）
+  assert.equal(doc.querySelectorAll('.hand-row').length, 1, '交接结果一行');
+  const panel = doc.getElementById('panel-handoffs');
+  assert.equal(panel.hidden, false);
+  const row = doc.querySelector('.hand-row');
+  assert.match(row.textContent, /中央交接/);
+  assert.match(row.textContent, /甲/);
+  assert.match(row.textContent, /乙/);
+  assert.match(row.textContent, /1 个起始时窗/);
+  // 时窗约 4.91–6.09s
+  const win = row.querySelector('.hand-win');
+  assert.ok(win, '行内含可点击起始时窗');
+  assert.ok(Math.abs(Number(win.getAttribute('data-t')) - 4.90909091) < 1e-6);
+
+  // 时间轴两名当事人泳道各有交接可行段淡条与时窗实条
+  assert.ok(doc.querySelectorAll('.tl-handoff-seg').length >= 2, '甲乙泳道各一条可行段');
+  assert.ok(doc.querySelectorAll('.tl-handoff-win').length >= 2, '甲乙泳道各一条时窗');
+
+  // 点击时窗：播放头跳到时窗起点
+  win.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  const tv = Number(doc.getElementById('time-input').value);
+  assert.ok(Math.abs(tv - 4.90909091) < 0.02, `播放头应跳到 4.91，实际 ${tv}`);
+  dom.window.close();
+});
+
+test('道具交接：拖出新交接区、编辑参数即时更新、删除', async () => {
+  const dom = await boot();
+  const { window } = dom;
+  const doc = window.document;
+  const canvas = doc.getElementById('stage');
+
+  function pointer(type, x, y) {
+    canvas.dispatchEvent(new window.MouseEvent(type, {
+      bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0
+    }));
+  }
+
+  // 进入交接区新增模式：拖出 (100,100)-(260,260) 的矩形
+  const addBtn = doc.getElementById('btn-handoff');
+  addBtn.click();
+  assert.match(addBtn.textContent, /取消交接区/);
+  pointer('pointerdown', 100, 100);
+  pointer('pointermove', 260, 260);
+  pointer('pointerup', 260, 260);
+  await new Promise((r) => setTimeout(r, 10));
+
+  assert.equal(doc.querySelectorAll('.hand-row').length, 2, '样例 1 项 + 新增 1 项');
+  // 新交接默认当事人为选中者甲(p1)与乙(p2)，甲从 (60,300) 出发、乙从 (500,40)，
+  // 区域 (100,100,160×160) 内两人从不同时进入 → 无可交接区间
+  const rows = [...doc.querySelectorAll('.hand-row')];
+  const fresh = rows[rows.length - 1];
+  assert.match(fresh.textContent, /无可交接区间|无起始时窗/);
+  // 新增后该交接区处于选中态，编辑条可见
+  const editor = doc.getElementById('handoff-editor');
+  assert.equal(editor.hidden, false);
+
+  // 把触达距离调大仍无济于事（两人从不同时入区）；再把区域扩大到覆盖交叉点：
+  // (100,100) 起 450×400，右边界 550 > 乙的竖直路径 x=500（严格在内）
+  const wInput = doc.getElementById('he-width');
+  const hInput = doc.getElementById('he-height');
+  wInput.value = '450';
+  wInput.dispatchEvent(new window.Event('change', { bubbles: true }));
+  hInput.value = '400';
+  hInput.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 10));
+  const rows2 = [...doc.querySelectorAll('.hand-row')];
+  const edited = rows2[rows2.length - 1];
+  assert.match(edited.textContent, /起始时窗/, '覆盖交叉路径后应解出时窗');
+
+  // 最短持续调到很大（12s）→ 无起始时窗但可行区间仍在
+  const dInput = doc.getElementById('he-duration');
+  dInput.value = '12';
+  dInput.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 10));
+  const rows3 = [...doc.querySelectorAll('.hand-row')];
+  assert.match(rows3[rows3.length - 1].textContent, /无起始时窗/);
+
+  // 删除该交接区
+  doc.getElementById('he-delete').click();
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(doc.querySelectorAll('.hand-row').length, 1, '删除后只剩样例交接');
+  assert.equal(doc.getElementById('handoff-editor').hidden, true);
+  dom.window.close();
+});
+
+test('道具交接：单击投放默认尺寸、Esc 取消新增模式、删除当事人连带清理', async () => {
+  const dom = await boot();
+  const { window } = dom;
+  const doc = window.document;
+  const canvas = doc.getElementById('stage');
+
+  function pointer(type, x, y) {
+    canvas.dispatchEvent(new window.MouseEvent(type, {
+      bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0
+    }));
+  }
+
+  // Esc 在非新增模式下无副作用；进入新增模式后 Esc 取消
+  doc.getElementById('btn-handoff').click();
+  window.dispatchEvent(new window.KeyboardEvent('keydown', { code: 'Escape', bubbles: true }));
+  assert.match(doc.getElementById('btn-handoff').textContent, /＋ 交接区/);
+
+  // 单击空白投放默认 140 尺寸交接区
+  doc.getElementById('btn-handoff').click();
+  pointer('pointerdown', 300, 300);
+  pointer('pointerup', 300, 300);
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(doc.querySelectorAll('.hand-row').length, 2);
+
+  // 删除一名当事人（新交接默认引用 p1/p2 之一，删 p4 丁不影响；改删 p2 乙后，
+  // 引用乙的交接配置全部连带移除，包括样例中央交接 → 可能只剩不含乙的新增项）
+  const dels = doc.querySelectorAll('.performer-del');
+  // 删乙（第 2 人）
+  dels[1].click();
+  await new Promise((r) => setTimeout(r, 10));
+  const rows = [...doc.querySelectorAll('.hand-row')];
+  rows.forEach((row) => {
+    // 任何剩余交接都不应再引用乙
+    assert.ok(!/乙/.test(row.textContent) || /交接/.test(row.textContent) === false);
+  });
+  // 样例交接引用甲、乙，必然被清理
+  assert.ok(!rows.some((r) => /中央交接/.test(r.textContent)), '引用被删当事人的交接已清理');
+  dom.window.close();
+});
+
+test('道具交接：随快照保存并在载入时恢复', async () => {
+  const dom = await boot();
+  const { window } = dom;
+  const doc = window.document;
+
+  // 样例含 1 项交接；改最短持续为 0.5 后存快照
+  doc.querySelector('.hand-row').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 5));
+  const dInput = doc.getElementById('he-duration');
+  assert.equal(doc.getElementById('handoff-editor').hidden, false);
+  dInput.value = '0.5';
+  dInput.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 10));
+
+  doc.getElementById('snap-name').value = '交接案';
+  doc.getElementById('btn-snap-save').click();
+  await new Promise((r) => setTimeout(r, 10));
+  const stored = JSON.parse(window.localStorage.getItem('trajectory-collision-stage.snapshots.v1'));
+  assert.equal(stored.list[0].scene.handoffs.length, 1);
+  const sh = stored.list[0].scene.handoffs[0];
+  assert.equal(sh.name, '中央交接');
+  assert.equal(sh.aId, 'p1');
+  assert.equal(sh.bId, 'p2');
+  assert.ok(Math.abs(sh.minDuration - 0.5) < 1e-9);
+
+  // 清空交接（删除当前交接区）后载入快照：交接配置恢复
+  doc.getElementById('he-delete').click();
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(doc.querySelectorAll('.hand-row').length, 0);
+  assert.equal(doc.getElementById('panel-handoffs').hidden, true);
+
+  doc.querySelector('.snap-item .snap-load').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(doc.querySelectorAll('.hand-row').length, 1);
+  assert.match(doc.querySelector('.hand-row').textContent, /中央交接/);
+  // d=0.5：时窗宽度 = 段长 2.18 - 0.5 = 1.68
+  const win = doc.querySelector('.hand-win');
+  assert.ok(Math.abs(Number(win.getAttribute('data-t')) - 4.90909091) < 0.01);
+  dom.window.close();
+});

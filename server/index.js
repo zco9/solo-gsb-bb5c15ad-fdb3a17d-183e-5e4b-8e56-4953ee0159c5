@@ -26,10 +26,11 @@ app.get('/api/sample', (_req, res) => {
  * （缺省继承的帧解析为表演者当前 radius），禁入矩形经坐标/尺寸规整，
  * 便于集成方直接消费。
  */
-function resolveScene(duration, performers, obstacles) {
+function resolveScene(duration, performers, obstacles, handoffs) {
   return {
     duration: duration,
     obstacles: core.normalizeObstacles(obstacles),
+    handoffs: core.normalizeHandoffs(handoffs, duration),
     performers: performers.map((p) => {
       const base = Math.max(0, Number(p.radius) || 0);
       const ks = core.normalizeKeys(p.keys, base);
@@ -65,7 +66,10 @@ function resolveScene(duration, performers, obstacles) {
  * （distance(t)-(rA+rB) 的连续全局最小值及发生时刻），pairs 按余量升序；
  * obstacleConflicts 为每位表演者 × 每个禁入矩形的精确侵入区间，按首次
  * 进入时刻升序；场景级另附 minMargin/minMarginT/minMarginPair 与
- * firstObstacleEntry/firstObstacleConflict。旧请求（无 obstacles/cues）完全兼容。
+ * firstObstacleEntry/firstObstacleConflict。
+ * handoffs 为道具交接配置数组，handoffResults 给出每项两人圆心同时严格
+ * 位于交接区内部且间距 ≤ reach 的合并区间与最短持续起始时窗。
+ * 旧请求（无 obstacles/cues/handoffs）完全兼容。
  */
 app.post('/api/analyze', (req, res) => {
   try {
@@ -73,6 +77,7 @@ app.post('/api/analyze', (req, res) => {
     const duration = Number(scene.duration);
     const performers = Array.isArray(scene.performers) ? scene.performers : [];
     const rawObstacles = scene.obstacles;
+    const rawHandoffs = scene.handoffs;
 
     if (!(duration > 0) || !isFinite(duration)) {
       return res.status(400).json({ error: 'duration 必须为正数（秒）' });
@@ -82,6 +87,9 @@ app.post('/api/analyze', (req, res) => {
     }
     if (rawObstacles !== undefined && rawObstacles !== null && !Array.isArray(rawObstacles)) {
       return res.status(400).json({ error: 'obstacles 必须为数组' });
+    }
+    if (rawHandoffs !== undefined && rawHandoffs !== null && !Array.isArray(rawHandoffs)) {
+      return res.status(400).json({ error: 'handoffs 必须为数组' });
     }
 
     performers.forEach((p, idx) => {
@@ -144,10 +152,46 @@ app.post('/api/analyze', (req, res) => {
       }
     });
 
+    // 道具交接配置入参校验（缺省/空数组直接跳过，保持旧请求兼容）
+    const performerIdMap = {};
+    performers.forEach((p) => { performerIdMap[String(p.id)] = true; });
+    (rawHandoffs || []).forEach((h, idx) => {
+      const where = `第 ${idx + 1} 项交接配置`;
+      if (!h || typeof h !== 'object') {
+        throw new Error(`${where}格式非法`);
+      }
+      ['x', 'y', 'width', 'height', 'reach'].forEach((f) => {
+        if (!isFinite(Number(h[f]))) {
+          throw new Error(`${where}的 ${f} 必须为有限数`);
+        }
+      });
+      if (Number(h.width) < 0 || Number(h.height) < 0) {
+        throw new Error(`${where}的 width/height 不能为负`);
+      }
+      if (Number(h.reach) < 0) {
+        throw new Error(`${where}的 reach（最大圆心触达距离）不能为负`);
+      }
+      if (h.minDuration !== undefined && h.minDuration !== null && h.minDuration !== '') {
+        if (!isFinite(Number(h.minDuration)) || Number(h.minDuration) <= 0) {
+          throw new Error(`${where}的 minDuration（最短持续秒数）必须为正数`);
+        }
+      }
+      if (h.aId === null || h.aId === undefined || h.bId === null || h.bId === undefined) {
+        throw new Error(`${where}必须指定两名表演者 aId / bId`);
+      }
+      if (String(h.aId) === String(h.bId)) {
+        throw new Error(`${where}的两名表演者不能为同一人`);
+      }
+      if (!performerIdMap[String(h.aId)] || !performerIdMap[String(h.bId)]) {
+        throw new Error(`${where}引用了不存在的表演者`);
+      }
+    });
+
     const obstacles = core.normalizeObstacles(rawObstacles);
-    const result = core.analyzeScene({ duration, performers, obstacles });
+    const handoffs = core.normalizeHandoffs(rawHandoffs, duration, performerIdMap);
+    const result = core.analyzeScene({ duration, performers, obstacles, handoffs });
     res.json(Object.assign(
-      { scene: resolveScene(duration, performers, obstacles) },
+      { scene: resolveScene(duration, performers, obstacles, handoffs) },
       result
     ));
   } catch (err) {

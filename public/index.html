@@ -17,6 +17,7 @@
     </div>
     <div class="top-actions">
       <button id="btn-obstacle" class="btn" title="在画布上拖出一个轴对齐禁入矩形（再点空白处单击可放默认尺寸）">＋ 禁入区</button>
+      <button id="btn-handoff" class="btn" title="拖出一个轴对齐交接区，再选择两名表演者、触达距离与最短持续秒数">＋ 交接区</button>
       <button id="btn-sample" class="btn" title="载入内置路径交叉样例">重置样例</button>
       <button id="btn-clear" class="btn btn-ghost" title="清空全部走位点">清空</button>
     </div>
@@ -28,7 +29,7 @@
       <div class="panel">
         <div class="panel-head">
           <span>舞台（世界坐标 1000 × 600）</span>
-          <span class="hint">拖动圆点走位 · 双击空白加帧 · 右键圆点删帧 · 选中圆点可改安全半径 · 拖动禁入区矩形移位 · 右键矩形删除 · 虚线彩框＝选中者的入场口令</span>
+          <span class="hint">拖动圆点走位 · 双击空白加帧 · 右键圆点删帧 · 选中圆点可改安全半径 · 拖动禁入区/交接区矩形移位 · 右键矩形删除 · 虚线彩框＝选中者的入场口令</span>
         </div>
         <div class="canvas-wrap">
           <canvas id="stage" width="1000" height="600"></canvas>
@@ -56,6 +57,28 @@
             <button id="oe-delete" class="btn btn-mini" type="button" title="删除该禁入矩形">✕ 删除</button>
           </div>
           <div class="ke-hint">轴对齐矩形：表演者按实时安全半径视为圆，连续解析侵入区间（无帧抽样）</div>
+        </div>
+        <div id="handoff-editor" class="key-editor handoff-editor" hidden>
+          <div class="ke-head">
+            <span id="he-info" class="ke-info">道具交接</span>
+            <label class="ke-radius-edit">名称 <input id="he-name" type="text" /></label>
+            <label class="ke-radius-edit">
+              表演者
+              <select id="he-a"></select>
+              <span style="color:var(--text-dim)">×</span>
+              <select id="he-b"></select>
+            </label>
+            <label class="ke-radius-edit">
+              宽 <input id="he-width" type="number" min="0" step="1" />
+              高 <input id="he-height" type="number" min="0" step="1" />
+            </label>
+            <label class="ke-radius-edit">
+              触达距离 <input id="he-reach" type="number" min="0" step="1" />
+              最短持续 <input id="he-duration" type="number" min="0.1" step="0.1" /> s
+            </label>
+            <button id="he-delete" class="btn btn-mini" type="button" title="删除该交接配置">✕ 删除</button>
+          </div>
+          <div class="ke-hint">两人圆心同时严格位于矩形内部（贴边不计）且圆心间距 ≤ 触达距离；每段 [a,b] 持续 ≥ d 时给出起始时窗 [a, b−d]，点击右侧时窗跳转播放头</div>
         </div>
       </div>
 
@@ -174,6 +197,11 @@
       <div class="panel panel-pairs" id="panel-obstacles" hidden>
         <div class="panel-head"><span>禁入区侵入（按首次进入时刻升序 · 点击结果跳到进入时刻）</span></div>
         <div id="obstacle-results" class="pair-list"></div>
+      </div>
+
+      <div class="panel panel-pairs panel-handoffs" id="panel-handoffs" hidden>
+        <div class="panel-head"><span>道具交接时窗（点击起始时窗跳转播放头）</span></div>
+        <div id="handoff-results" class="pair-list"></div>
       </div>
 
       <div class="panel panel-pairs">

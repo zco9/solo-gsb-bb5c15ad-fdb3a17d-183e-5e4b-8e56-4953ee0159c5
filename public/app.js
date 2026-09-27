@@ -10,6 +10,10 @@
   var KEY_HIT_PX = 9;      // 走位点命中半径（屏幕像素）
   var TICK_HIT_PX = 7;     // 时间轴时刻柄命中半径
   var NEW_OBS_SIZE = 120;  // 单击画布新增禁入矩形的默认边长
+  var NEW_HANDOFF_SIZE = 140; // 单击画布新增交接区的默认边长
+  var HANDOFF_REACH_DEFAULT = 80; // 新增交接配置的默认最大圆心触达距离
+  var HANDOFF_DUR_DEFAULT = 1;    // 新增交接配置的默认最短持续秒数
+  var HANDOFF_COLOR = '#2dd4bf';  // 交接区主题色（青绿色，区别于禁入区琥珀）
 
   var canvas = document.getElementById('stage');
   var ctx = canvas.getContext('2d');
@@ -20,10 +24,13 @@
     duration: 12,
     performers: [],
     obstacles: [],
+    handoffs: [],
     selectedPid: null,
     selectedKey: null,      // {pid, index}
     selectedObstacleId: null,
+    selectedHandoffId: null,
     addObstacleMode: false, // 下一次在画布拖出/单击投放禁入矩形
+    addHandoffMode: false,  // 下一次在画布拖出/单击投放交接区
     time: 0,
     playing: false,
     speed: 1,
@@ -46,6 +53,10 @@
 
   function getObstacle(oid) {
     return state.obstacles.find(function (o) { return o.id === oid; }) || null;
+  }
+
+  function getHandoff(hid) {
+    return state.handoffs.find(function (h) { return h.id === hid; }) || null;
   }
 
   // ---------- 场景装载 ----------
@@ -88,11 +99,25 @@
       o.height = Math.round(o.height);
       return o;
     });
+    // 交接配置经引擎同一规整（引用当事人须存在且不同；d>0、reach≥0、尺寸非负）
+    var pidSet = {};
+    state.performers.forEach(function (p) { pidSet[p.id] = true; });
+    state.handoffs = Core.normalizeHandoffs(scene.handoffs, state.duration, pidSet).map(function (h) {
+      h.x = Math.round(h.x);
+      h.y = Math.round(h.y);
+      h.width = Math.round(h.width);
+      h.height = Math.round(h.height);
+      h.reach = Math.round(h.reach * 10) / 10;
+      h.minDuration = Math.round(h.minDuration * 100) / 100;
+      return h;
+    });
     state.selectedPid = state.performers[0] ? state.performers[0].id : null;
     state.selectedKey = null;
     state.selectedObstacleId = null;
+    state.selectedHandoffId = null;
     state.activePairKey = null;
     setAddObstacleMode(false);
+    setAddHandoffMode(false);
     state.time = opts.keepTime ? Math.min(state.time, state.duration) : 0;
     state.playing = false;
     document.getElementById('duration-input').value = state.duration;
@@ -126,11 +151,13 @@
     state.analysis = Core.analyzeScene({
       duration: state.duration,
       performers: state.performers,
-      obstacles: state.obstacles
+      obstacles: state.obstacles,
+      handoffs: state.handoffs
     });
     renderSummary();
     renderPairs();
     renderObstacleResults();
+    renderHandoffResults();
     renderCueResults();
     renderTimelineDanger();
     updatePlayhead();
@@ -161,6 +188,16 @@
       var o = state.obstacles[i];
       if (wx >= o.x && wx <= o.x + o.width && wy >= o.y && wy <= o.y + o.height) {
         return o;
+      }
+    }
+    return null;
+  }
+
+  function hitTestHandoff(wx, wy) {
+    for (var i = state.handoffs.length - 1; i >= 0; i--) {
+      var h = state.handoffs[i];
+      if (wx >= h.x && wx <= h.x + h.width && wy >= h.y && wy <= h.y + h.height) {
+        return h;
       }
     }
     return null;
@@ -208,9 +245,24 @@
       return;
     }
 
+    // 交接区新增模式：拖出矩形（单击则投放默认尺寸）
+    if (state.addHandoffMode) {
+      state.drag = {
+        type: 'handoff-new',
+        x0: w.x,
+        y0: w.y,
+        x1: w.x,
+        y1: w.y,
+        moved: false
+      };
+      canvas.setPointerCapture(e.pointerId);
+      return;
+    }
+
     var hitObs = hitTestObstacle(w.x, w.y);
     if (hitObs) {
       state.selectedObstacleId = hitObs.id;
+      state.selectedHandoffId = null;
       state.selectedKey = null;
       state.drag = {
         type: 'obstacle',
@@ -225,11 +277,30 @@
       return;
     }
 
+    var hitHand = hitTestHandoff(w.x, w.y);
+    if (hitHand) {
+      state.selectedHandoffId = hitHand.id;
+      state.selectedObstacleId = null;
+      state.selectedKey = null;
+      state.drag = {
+        type: 'handoff',
+        hid: hitHand.id,
+        offX: w.x - hitHand.x,
+        offY: w.y - hitHand.y,
+        moved: false
+      };
+      canvas.setPointerCapture(e.pointerId);
+      renderPerformers();
+      draw();
+      return;
+    }
+
     var hit = hitTestKey(w.x, w.y);
     if (hit) {
       state.selectedPid = hit.pid;
       state.selectedKey = { pid: hit.pid, index: hit.index };
       state.selectedObstacleId = null;
+      state.selectedHandoffId = null;
       var p = getPerformer(hit.pid);
       state.drag = {
         type: 'key',
@@ -244,6 +315,7 @@
     } else if (state.selectedPid) {
       // 空白按下：准备新增走位点（pointerup 未移动则加入）
       state.selectedObstacleId = null;
+      state.selectedHandoffId = null;
       state.drag = { type: 'new', x: w.x, y: w.y, moved: false };
       canvas.setPointerCapture(e.pointerId);
       draw();
@@ -264,12 +336,33 @@
       return;
     }
 
+    if (state.drag && state.drag.type === 'handoff-new') {
+      if (Math.abs(w.x - state.drag.x0) * v.sx > 4 || Math.abs(w.y - state.drag.y0) * v.sy > 4) {
+        state.drag.moved = true;
+      }
+      state.drag.x1 = w.x;
+      state.drag.y1 = w.y;
+      draw();
+      return;
+    }
+
     if (state.drag && state.drag.type === 'obstacle') {
       var o = getObstacle(state.drag.oid);
       if (!o) return;
       state.drag.moved = true;
       o.x = clamp(Math.round(w.x - state.drag.offX), 0, Math.max(0, WORLD_W - o.width));
       o.y = clamp(Math.round(w.y - state.drag.offY), 0, Math.max(0, WORLD_H - o.height));
+      recompute();
+      draw();
+      return;
+    }
+
+    if (state.drag && state.drag.type === 'handoff') {
+      var h = getHandoff(state.drag.hid);
+      if (!h) return;
+      state.drag.moved = true;
+      h.x = clamp(Math.round(w.x - state.drag.offX), 0, Math.max(0, WORLD_W - h.width));
+      h.y = clamp(Math.round(w.y - state.drag.offY), 0, Math.max(0, WORLD_H - h.height));
       recompute();
       draw();
       return;
@@ -295,12 +388,13 @@
     }
 
     // 悬停命中提示
-    if (state.addObstacleMode) {
+    if (state.addObstacleMode || state.addHandoffMode) {
       canvas.style.cursor = 'crosshair';
       tooltip.hidden = true;
       return;
     }
     var hoverObs = hitTestObstacle(w.x, w.y);
+    var hoverHand = !hoverObs ? hitTestHandoff(w.x, w.y) : null;
     var hover = hitTestKey(w.x, w.y);
     if (hoverObs) {
       canvas.style.cursor = 'move';
@@ -309,6 +403,17 @@
       tooltip.textContent = hoverObs.name + ' · 禁入矩形 (' + Math.round(hoverObs.x) + ', ' +
         Math.round(hoverObs.y) + ') ' + Math.round(hoverObs.width) + '×' + Math.round(hoverObs.height) +
         (intruders ? ' · 当前侵入 ' + intruders : ' · 拖动移位 · 右键删除');
+      positionTooltip(e);
+    } else if (hoverHand) {
+      canvas.style.cursor = 'move';
+      var res = handoffResultById(hoverHand.id);
+      var nWin = res ? res.windows.length : 0;
+      tooltip.hidden = false;
+      tooltip.textContent = hoverHand.name + ' · 交接区 (' + Math.round(hoverHand.x) + ', ' +
+        Math.round(hoverHand.y) + ') ' + Math.round(hoverHand.width) + '×' + Math.round(hoverHand.height) +
+        ' · 触达 ' + hoverHand.reach + ' · ≥' + hoverHand.minDuration + 's' +
+        (nWin ? ' · ' + nWin + ' 个起始时窗' : ' · 无可交接时窗') +
+        ' · 拖动移位 · 右键删除';
       positionTooltip(e);
     } else if (hover) {
       canvas.style.cursor = 'grab';
@@ -338,6 +443,13 @@
         // 单击：以落点附近为左上角投放默认尺寸矩形（自动收回画布内）
         addObstacleRect(w2.x, w2.y, w2.x + NEW_OBS_SIZE, w2.y + NEW_OBS_SIZE);
       }
+    } else if (drag.type === 'handoff-new') {
+      var wh = toWorld(e.clientX, e.clientY);
+      if (drag.moved) {
+        addHandoffZone(drag.x0, drag.y0, wh.x, wh.y);
+      } else {
+        addHandoffZone(wh.x, wh.y, wh.x + NEW_HANDOFF_SIZE, wh.y + NEW_HANDOFF_SIZE);
+      }
     } else if (drag.type === 'new' && !drag.moved && state.selectedPid) {
       var w3 = toWorld(e.clientX, e.clientY);
       addKey(state.selectedPid, state.time, w3.x, w3.y);
@@ -356,20 +468,26 @@
 
   // 双击空白：在当前播放时刻为选中者加帧（与单击新增并存，双击更直观）
   canvas.addEventListener('dblclick', function (e) {
-    if (state.addObstacleMode || !state.selectedPid) return;
+    if (state.addObstacleMode || state.addHandoffMode || !state.selectedPid) return;
     var w = toWorld(e.clientX, e.clientY);
     if (hitTestObstacle(w.x, w.y)) return;
+    if (hitTestHandoff(w.x, w.y)) return;
     if (hitTestKey(w.x, w.y)) return;
     addKey(state.selectedPid, state.time, w.x, w.y);
   });
 
-  // 右键圆点：删除该走位点（每人保留至少 1 帧）；右键禁入矩形：删除该矩形
+  // 右键圆点：删除该走位点（每人保留至少 1 帧）；右键禁入矩形/交接区：删除
   canvas.addEventListener('contextmenu', function (e) {
     e.preventDefault();
     var w = toWorld(e.clientX, e.clientY);
     var hitObs = hitTestObstacle(w.x, w.y);
     if (hitObs) {
       removeObstacle(hitObs.id);
+      return;
+    }
+    var hitHand = hitTestHandoff(w.x, w.y);
+    if (hitHand) {
+      removeHandoff(hitHand.id);
       return;
     }
     var hit = hitTestKey(w.x, w.y);
@@ -505,6 +623,7 @@
 
   function setAddObstacleMode(on) {
     state.addObstacleMode = !!on;
+    if (on) setAddHandoffMode(false);
     btnObstacle.classList.toggle('active', state.addObstacleMode);
     btnObstacle.textContent = state.addObstacleMode ? '✕ 取消禁入区' : '＋ 禁入区';
     canvas.style.cursor = state.addObstacleMode ? 'crosshair' : '';
@@ -595,6 +714,212 @@
   oeHeightInput.addEventListener('change', commitObstacleSize);
   oeDeleteBtn.addEventListener('click', function () {
     if (state.selectedObstacleId) removeObstacle(state.selectedObstacleId);
+  });
+
+  // ---------- 道具交接区：新增 / 删除 / 编辑 ----------
+  var btnHandoff = document.getElementById('btn-handoff');
+  var handoffEditorEl = document.getElementById('handoff-editor');
+  var heInfoEl = document.getElementById('he-info');
+  var heNameInput = document.getElementById('he-name');
+  var heASelect = document.getElementById('he-a');
+  var heBSelect = document.getElementById('he-b');
+  var heWidthInput = document.getElementById('he-width');
+  var heHeightInput = document.getElementById('he-height');
+  var heReachInput = document.getElementById('he-reach');
+  var heDurationInput = document.getElementById('he-duration');
+  var heDeleteBtn = document.getElementById('he-delete');
+
+  function setAddHandoffMode(on) {
+    state.addHandoffMode = !!on;
+    if (on && state.addObstacleMode) setAddObstacleMode(false);
+    btnHandoff.classList.toggle('active', state.addHandoffMode);
+    btnHandoff.textContent = state.addHandoffMode ? '✕ 取消交接区' : '＋ 交接区';
+    canvas.style.cursor = state.addHandoffMode ? 'crosshair' : '';
+  }
+
+  btnHandoff.addEventListener('click', function () {
+    setAddHandoffMode(!state.addHandoffMode);
+  });
+
+  // 新增交接区（拖出/单击）：当事人默认取当前选中者与另一人，
+  // 触达距离与最短持续取默认值
+  function addHandoffZone(x0, y0, x1, y1) {
+    if (state.performers.length < 2) {
+      setAddHandoffMode(false);
+      return;
+    }
+    var x = clamp(Math.round(Math.min(x0, x1)), 0, WORLD_W);
+    var y = clamp(Math.round(Math.min(y0, y1)), 0, WORLD_H);
+    var right = clamp(Math.round(Math.max(x0, x1)), 0, WORLD_W);
+    var bottom = clamp(Math.round(Math.max(y0, y1)), 0, WORLD_H);
+    var width = right - x;
+    var height = bottom - y;
+    if (width < 4 || height < 4) {
+      width = NEW_HANDOFF_SIZE;
+      height = NEW_HANDOFF_SIZE;
+      x = clamp(x - Math.round(NEW_HANDOFF_SIZE / 2), 0, WORLD_W - width);
+      y = clamp(y - Math.round(NEW_HANDOFF_SIZE / 2), 0, WORLD_H - height);
+    }
+    var selIdx = state.performers.findIndex(function (p) { return p.id === state.selectedPid; });
+    var pa = state.performers[selIdx] || state.performers[0];
+    var pb = state.performers[(selIdx + 1) % state.performers.length] || state.performers[1];
+    var normalized = Core.normalizeHandoffs([{
+      aId: pa.id,
+      bId: pb.id,
+      x: x, y: y, width: width, height: height,
+      reach: HANDOFF_REACH_DEFAULT,
+      minDuration: HANDOFF_DUR_DEFAULT
+    }], state.duration, performerIdSet())[0];
+    state.handoffs.push(normalized);
+    state.selectedHandoffId = normalized.id;
+    state.selectedObstacleId = null;
+    state.selectedKey = null;
+    setAddHandoffMode(false);
+    recompute();
+    renderPerformers();
+    renderTimelineStatic();
+    draw();
+  }
+
+  function performerIdSet() {
+    var set = {};
+    state.performers.forEach(function (p) { set[p.id] = true; });
+    return set;
+  }
+
+  function removeHandoff(hid) {
+    state.handoffs = state.handoffs.filter(function (h) { return h.id !== hid; });
+    if (state.selectedHandoffId === hid) state.selectedHandoffId = null;
+    recompute();
+    renderTimelineStatic();
+    draw();
+  }
+
+  function getSelectedHandoff() {
+    if (!state.selectedHandoffId) return null;
+    return getHandoff(state.selectedHandoffId);
+  }
+
+  // 重新规整交接配置（编辑当事人/时长后兜底：d>0、当事人有效、坐标收回画布）
+  function renormalizeHandoffs() {
+    state.handoffs = Core.normalizeHandoffs(state.handoffs, state.duration, performerIdSet());
+    if (state.selectedHandoffId && !getHandoff(state.selectedHandoffId)) {
+      state.selectedHandoffId = null;
+    }
+  }
+
+  function populateHandoffSelectors(h) {
+    function fill(sel, currentId) {
+      var prevFocus = document.activeElement === sel;
+      sel.innerHTML = '';
+      state.performers.forEach(function (p) {
+        var opt = document.createElement('option');
+        opt.value = p.id;
+        opt.textContent = p.name;
+        opt.style.color = p.color;
+        sel.appendChild(opt);
+      });
+      sel.value = currentId;
+      if (prevFocus) sel.focus();
+    }
+    fill(heASelect, h.aId);
+    fill(heBSelect, h.bId);
+  }
+
+  function renderHandoffEditor() {
+    var h = getSelectedHandoff();
+    if (!h) {
+      handoffEditorEl.hidden = true;
+      return;
+    }
+    handoffEditorEl.hidden = false;
+    var pa = getPerformer(h.aId);
+    var pb = getPerformer(h.bId);
+    if (document.activeElement !== heNameInput) heNameInput.value = h.name;
+    populateHandoffSelectors(h);
+    if (document.activeElement !== heWidthInput) heWidthInput.value = Math.round(h.width);
+    if (document.activeElement !== heHeightInput) heHeightInput.value = Math.round(h.height);
+    if (document.activeElement !== heReachInput) heReachInput.value = h.reach;
+    if (document.activeElement !== heDurationInput) heDurationInput.value = h.minDuration;
+    heInfoEl.textContent = h.name + ' · (' + Math.round(h.x) + ', ' + Math.round(h.y) + ')' +
+      (pa && pb ? ' · ' + pa.name + ' × ' + pb.name : ' · 当事人无效');
+  }
+
+  heNameInput.addEventListener('change', function () {
+    var h = getSelectedHandoff();
+    if (!h) return;
+    h.name = heNameInput.value.trim() || h.name;
+    recompute();
+    renderHandoffResults();
+    draw();
+  });
+  heNameInput.addEventListener('pointerdown', function (e) { e.stopPropagation(); });
+
+  function commitHandoffPeople() {
+    var h = getSelectedHandoff();
+    if (!h) return;
+    if (heASelect.value === heBSelect.value) {
+      // 两人相同：还原选择，不提交
+      populateHandoffSelectors(h);
+      return;
+    }
+    h.aId = heASelect.value;
+    h.bId = heBSelect.value;
+    renormalizeHandoffs();
+    recompute();
+    renderTimelineStatic();
+    draw();
+  }
+  heASelect.addEventListener('change', commitHandoffPeople);
+  heBSelect.addEventListener('change', commitHandoffPeople);
+
+  function commitHandoffSize() {
+    var h = getSelectedHandoff();
+    if (!h) return;
+    var w = Number(heWidthInput.value);
+    var hh = Number(heHeightInput.value);
+    if (isFinite(w) && w >= 0 && heWidthInput.value !== '') {
+      h.width = clamp(Math.round(w), 0, WORLD_W);
+    }
+    if (isFinite(hh) && hh >= 0 && heHeightInput.value !== '') {
+      h.height = clamp(Math.round(hh), 0, WORLD_H);
+    }
+    h.x = clamp(h.x, 0, Math.max(0, WORLD_W - h.width));
+    h.y = clamp(h.y, 0, Math.max(0, WORLD_H - h.height));
+    recompute();
+    renderTimelineStatic();
+    draw();
+  }
+  heWidthInput.addEventListener('change', commitHandoffSize);
+  heHeightInput.addEventListener('change', commitHandoffSize);
+
+  heReachInput.addEventListener('change', function () {
+    var h = getSelectedHandoff();
+    if (!h) return;
+    var v = Number(heReachInput.value);
+    if (isFinite(v) && v >= 0) {
+      h.reach = Math.round(v * 10) / 10;
+      recompute();
+      draw();
+    }
+  });
+
+  heDurationInput.addEventListener('change', function () {
+    var h = getSelectedHandoff();
+    if (!h) return;
+    var v = Number(heDurationInput.value);
+    if (isFinite(v) && v > 0) {
+      h.minDuration = clamp(Math.round(v * 100) / 100, 0.01, state.duration);
+      renormalizeHandoffs();
+      recompute();
+      renderTimelineStatic();
+      renderHandoffResults();
+      draw();
+    }
+  });
+
+  heDeleteBtn.addEventListener('click', function () {
+    if (state.selectedHandoffId) removeHandoff(state.selectedHandoffId);
   });
 
   // ---------- 入场口令面板（随表演者选中切换） ----------
@@ -886,6 +1211,16 @@
     });
     drawObstacleDraft();
 
+    // 交接区矩形（青绿虚线，主题色区别于禁入区）
+    var handActive = currentHandoffActive(t);
+    state.handoffs.forEach(function (h) {
+      drawHandoffZone(h, handActive[h.id]);
+    });
+    drawHandoffDraft();
+
+    // 当前处于交接可行区间：青绿虚线连接两当事人并标注圆心间距/触达
+    drawHandoffLinks(t);
+
     // 入场口令矩形：只画当前选中表演者（边框颜色 = 触发状态）
     state.performers.forEach(function (p) {
       if (p.id === state.selectedPid) drawCues(p);
@@ -904,7 +1239,9 @@
 
     renderKeyEditor();
     renderObstacleEditor();
+    renderHandoffEditor();
     updateObstacleResultActive(t);
+    updateHandoffResultActive(t);
   }
 
   function drawGrid() {
@@ -1082,6 +1419,21 @@
     return map;
   }
 
+  // 时刻 t 正处于可行交接区间的交接配置：{ handoffId: true }
+  function currentHandoffActive(t) {
+    var map = {};
+    if (!state.analysis) return map;
+    state.analysis.handoffResults.forEach(function (res) {
+      if (Core.isHandoffActive(res, t)) map[res.id] = true;
+    });
+    return map;
+  }
+
+  function handoffResultById(hid) {
+    if (!state.analysis) return null;
+    return state.analysis.handoffResults.find(function (r) { return r.id === hid; }) || null;
+  }
+
   // ---------- 禁入矩形绘制 ----------
   function drawObstacle(o, intruderIds) {
     var intruding = intruderIds && intruderIds.length > 0;
@@ -1146,6 +1498,94 @@
     ctx.strokeRect(x + 0.5, y + 0.5, w, h);
     ctx.setLineDash([]);
     ctx.restore();
+  }
+
+  // ---------- 交接区绘制 ----------
+  function drawHandoffZone(h, active) {
+    var selected = h.id === state.selectedHandoffId;
+    var pa = getPerformer(h.aId);
+    var pb = getPerformer(h.bId);
+    ctx.save();
+    ctx.fillStyle = active ? 'rgba(45,212,191,0.16)' : 'rgba(45,212,191,0.07)';
+    ctx.fillRect(h.x, h.y, h.width, h.height);
+
+    // 交接语义图标：双向箭头点阵
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(h.x, h.y, h.width, h.height);
+    ctx.clip();
+    ctx.strokeStyle = active ? 'rgba(45,212,191,0.35)' : 'rgba(45,212,191,0.18)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([2, 8]);
+    for (var d = -h.height; d < h.width; d += 14) {
+      ctx.beginPath();
+      ctx.moveTo(h.x + d, h.y);
+      ctx.lineTo(h.x + d + h.height, h.y + h.height);
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    ctx.setLineDash([10, 5]);
+    ctx.lineWidth = active ? 3 : (selected ? 2.5 : 1.8);
+    ctx.strokeStyle = active ? HANDOFF_COLOR : (selected ? '#5eead4' : 'rgba(94,234,212,0.7)');
+    ctx.strokeRect(h.x + 0.5, h.y + 0.5, Math.max(0, h.width - 1), Math.max(0, h.height - 1));
+    ctx.setLineDash([]);
+
+    // 名称与参数标注
+    ctx.font = 'bold 12px system-ui, sans-serif';
+    ctx.fillStyle = active ? '#5eead4' : 'rgba(190,240,232,0.92)';
+    var label = h.name;
+    ctx.fillText('⇄ ' + label, h.x + 8, h.y + 18);
+    ctx.font = '11px system-ui, sans-serif';
+    ctx.fillStyle = 'rgba(158,230,220,0.85)';
+    var who = (pa ? pa.name : h.aId) + ' × ' + (pb ? pb.name : h.bId);
+    ctx.fillText(who + ' · 触达 ' + h.reach + ' · ≥' + h.minDuration + 's', h.x + 8, h.y + 34);
+    ctx.restore();
+  }
+
+  function drawHandoffDraft() {
+    if (!state.drag || state.drag.type !== 'handoff-new') return;
+    var d = state.drag;
+    var x = Math.min(d.x0, d.x1);
+    var y = Math.min(d.y0, d.y1);
+    var w = Math.abs(d.x1 - d.x0);
+    var h = Math.abs(d.y1 - d.y0);
+    ctx.save();
+    ctx.fillStyle = 'rgba(45,212,191,0.13)';
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = HANDOFF_COLOR;
+    ctx.lineWidth = 2;
+    ctx.setLineDash([7, 5]);
+    ctx.strokeRect(x + 0.5, y + 0.5, w, h);
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+
+  function drawHandoffLinks(t) {
+    if (!state.analysis) return;
+    state.analysis.handoffResults.forEach(function (res) {
+      if (!res.feasible || !Core.isHandoffActive(res, t)) return;
+      var pa = getPerformer(res.aId);
+      var pb = getPerformer(res.bId);
+      if (!pa || !pb) return;
+      var sa = Core.stateAt(pa.keys, t, pa.radius);
+      var sb = Core.stateAt(pb.keys, t, pb.radius);
+      ctx.beginPath();
+      ctx.moveTo(sa.x, sa.y);
+      ctx.lineTo(sb.x, sb.y);
+      ctx.strokeStyle = 'rgba(45,212,191,0.9)';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 4]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      var dist = Math.hypot(sa.x - sb.x, sa.y - sb.y);
+      var mx = (sa.x + sb.x) / 2;
+      var my = (sa.y + sb.y) / 2;
+      ctx.font = 'bold 12px system-ui, sans-serif';
+      ctx.fillStyle = '#5eead4';
+      ctx.fillText('交接可行 · 圆心距 ' + dist.toFixed(1) + ' ≤ ' + res.reach, mx + 6, my - 6);
+    });
   }
 
   // ---------- 入场口令绘制（只画选中者） ----------
@@ -1342,6 +1782,13 @@
   function removePerformer(pid) {
     if (state.performers.length <= 2) return;
     state.performers = state.performers.filter(function (p) { return p.id !== pid; });
+    // 删除当事人后，引用其的交接配置一并移除
+    state.handoffs = state.handoffs.filter(function (h) {
+      return h.aId !== pid && h.bId !== pid;
+    });
+    if (state.selectedHandoffId && !getHandoff(state.selectedHandoffId)) {
+      state.selectedHandoffId = null;
+    }
     if (state.selectedPid === pid) {
       state.selectedPid = state.performers[0].id;
       state.selectedKey = null;
@@ -1552,6 +1999,98 @@
     });
   }
 
+  // ---------- 道具交接结果 ----------
+  function renderHandoffResults() {
+    var panel = document.getElementById('panel-handoffs');
+    var box = document.getElementById('handoff-results');
+    box.innerHTML = '';
+    if (!state.analysis || !state.handoffs.length) {
+      panel.hidden = true;
+      return;
+    }
+    panel.hidden = false;
+
+    state.analysis.handoffResults.forEach(function (res) {
+      var pa = getPerformer(res.aId);
+      var pb = getPerformer(res.bId);
+      var row = document.createElement('div');
+      var ok = res.feasible && res.windows.length > 0;
+      row.className = 'hand-row ' + (ok ? 'ok' : (res.feasible ? 'nowin' : 'invalid'));
+      row.dataset.hid = res.id;
+
+      var badge = document.createElement('div');
+      badge.className = 'pair-badge';
+      badge.innerHTML =
+        '<span style="color:' + HANDOFF_COLOR + '">⇄</span>' +
+        escapeHtml(res.name) +
+        '<span class="mini-dot" style="background:' + (pa ? pa.color : '#888') + '"></span>' +
+        escapeHtml(res.aName) +
+        '<span style="color:var(--text-dim)">×</span>' +
+        '<span class="mini-dot" style="background:' + (pb ? pb.color : '#888') + '"></span>' +
+        escapeHtml(res.bName);
+
+      var status = document.createElement('div');
+      status.className = 'pair-status';
+      if (!res.feasible) {
+        status.innerHTML = '<b>配置无效</b> · 当事人不存在或为同一人，请重新选择两名表演者';
+      } else if (!res.intervals.length) {
+        status.innerHTML = '<b>无可交接区间</b> · 两人圆心从未同时严格进入交接区内部并达到触达距离 ' +
+          fmt(res.reach, 0) + '（贴边与瞬时触达不计）';
+      } else {
+        var segChips = res.intervals.map(function (iv) {
+          return '<span class="iv-chip hand-seg" title="两人同时严格在区内且圆心距 ≤ ' +
+            fmt(res.reach, 0) + ' 的可行区间">' + fmt(iv[0]) + ' – ' + fmt(iv[1]) + ' s</span>';
+        }).join('');
+        if (!res.windows.length) {
+          status.innerHTML =
+            '<b>无起始时窗</b> · 最长可行区间不足最短持续 ' + fmt(res.minDuration, 1) + 's' +
+            '<div class="interval-chips">' + segChips + '</div>';
+        } else {
+          var winChips = res.windows.map(function (w) {
+            return '<span class="iv-chip hand-win t-jump" data-t="' + w[0] +
+              '" title="点击把播放头跳到时窗起点 ' + fmt(w[0]) + 's">' +
+              fmt(w[0]) + ' – ' + fmt(w[1]) + ' s</span>';
+          }).join('');
+          status.innerHTML =
+            '<b>' + res.windows.length + ' 个起始时窗</b> · 最短持续 ' +
+            fmt(res.minDuration, 1) + 's · 触达 ' + fmt(res.reach, 0) +
+            '<div class="interval-chips">' + winChips + '</div>' +
+            '<div class="hand-segs">可行区间（进入–离开）：' + segChips + '</div>';
+        }
+      }
+
+      row.appendChild(badge);
+      row.appendChild(status);
+      // 点击时窗（含 chip）跳转播放头到时窗起点
+      Array.prototype.forEach.call(row.querySelectorAll('.hand-win'), function (el) {
+        el.addEventListener('click', function (e) {
+          e.stopPropagation();
+          seek(Number(el.getAttribute('data-t')));
+        });
+      });
+      // 点击整行选中该交接区（便于直接编辑）
+      row.addEventListener('click', function () {
+        state.selectedHandoffId = res.id;
+        state.selectedObstacleId = null;
+        state.selectedKey = null;
+        draw();
+      });
+      box.appendChild(row);
+    });
+    updateHandoffResultActive(state.time);
+  }
+
+  // 播放头移动时高亮当前正处于可行交接区间的结果行
+  function updateHandoffResultActive(t) {
+    if (!state.analysis) return;
+    var box = document.getElementById('handoff-results');
+    state.analysis.handoffResults.forEach(function (res) {
+      var row = box.querySelector('.hand-row[data-hid="' + res.id + '"]');
+      if (!row) return;
+      row.classList.toggle('active-now', Core.isHandoffActive(res, t));
+    });
+  }
+
   // ---------- 时间轴 ----------
   var timelineEl = document.getElementById('timeline');
   var lanesEl = document.getElementById('timeline-lanes');
@@ -1666,6 +2205,38 @@
           seek(iv[0]);
         });
         lane.appendChild(bar);
+      });
+    });
+
+    // 道具交接：两名当事人泳道叠加青绿色条——
+    // 淡条为两人同时严格在区内且够近的可行区间 [a,b]，
+    // 实条为最短持续起始时窗 [a,b-d]（点击跳到时窗起点）
+    state.analysis.handoffResults.forEach(function (res) {
+      if (!res.feasible) return;
+      [res.aId, res.bId].forEach(function (pid) {
+        var lane = lanesEl.querySelector('.tl-lane[data-pid="' + pid + '"]');
+        if (!lane) return;
+        res.intervals.forEach(function (iv) {
+          var seg = document.createElement('div');
+          seg.className = 'tl-handoff-seg';
+          seg.style.left = tToX(iv[0], lw) + 'px';
+          seg.style.width = Math.max(2, tToX(iv[1] - iv[0], lw)) + 'px';
+          seg.title = res.name + ' 可行区间 ' + iv[0].toFixed(2) + '–' + iv[1].toFixed(2) + 's';
+          lane.appendChild(seg);
+        });
+        res.windows.forEach(function (w) {
+          var bar = document.createElement('div');
+          bar.className = 'tl-handoff-win t-jump';
+          bar.style.left = tToX(w[0], lw) + 'px';
+          bar.style.width = Math.max(4, tToX(w[1] - w[0], lw)) + 'px';
+          bar.title = res.name + ' 起始时窗 ' + w[0].toFixed(2) + '–' + w[1].toFixed(2) +
+            's（最短持续 ' + res.minDuration + 's，点击跳到时窗起点）';
+          bar.addEventListener('click', function (e) {
+            e.stopPropagation();
+            seek(w[0]);
+          });
+          lane.appendChild(bar);
+        });
       });
     });
   }
@@ -1819,6 +2390,11 @@
       if (p.cues && p.cues.length) p.cues = Core.normalizeCues(p.cues, d);
       // 保证每人末帧覆盖新时长（静态延长）
     });
+    // 交接配置：最短持续钳到不超过新时长（当事人引用不变）
+    renormalizeHandoffs();
+    state.handoffs.forEach(function (h) {
+      if (h.minDuration > d) h.minDuration = Math.round(d * 100) / 100;
+    });
     state.time = Math.min(state.time, d);
     document.getElementById('duration-readout').textContent = d.toFixed(1);
     recompute();
@@ -1833,12 +2409,15 @@
     if (e.code === 'Space') {
       e.preventDefault();
       setPlaying(!state.playing);
-    } else if (e.code === 'Escape' && state.addObstacleMode) {
+    } else if (e.code === 'Escape' && (state.addObstacleMode || state.addHandoffMode)) {
       setAddObstacleMode(false);
+      setAddHandoffMode(false);
       state.drag = null;
       draw();
     } else if ((e.code === 'Delete' || e.code === 'Backspace') && state.selectedObstacleId) {
       removeObstacle(state.selectedObstacleId);
+    } else if ((e.code === 'Delete' || e.code === 'Backspace') && state.selectedHandoffId) {
+      removeHandoff(state.selectedHandoffId);
     } else if ((e.code === 'Delete' || e.code === 'Backspace') && state.selectedKey) {
       removeKey(state.selectedKey.pid, state.selectedKey.index);
     }
@@ -1866,12 +2445,13 @@
   var snapStatusEl = document.getElementById('snap-status');
   var snapStatusTimer = null;
 
-  // 深拷贝当前场景（状态中的 performer/obstacle 均为纯数据）
+  // 深拷贝当前场景（状态中的 performer/obstacle/handoff 均为纯数据）
   function serializeScene() {
     return JSON.parse(JSON.stringify({
       duration: state.duration,
       performers: state.performers,
-      obstacles: state.obstacles
+      obstacles: state.obstacles,
+      handoffs: state.handoffs
     }));
   }
 

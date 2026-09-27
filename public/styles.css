@@ -176,6 +176,81 @@ html, body {
 }
 .tl-obstacle:first-child { border-left: 1px solid rgba(227, 179, 65, .7); }
 
+/* 道具交接：顶部新增按钮激活态（青绿） */
+#btn-handoff.active { background: #2dd4bf; border-color: #2dd4bf; color: #052e2b; font-weight: 600; }
+
+/* 选中交接区的编辑条（青绿色系） */
+.handoff-editor {
+  border-color: rgba(45, 212, 191, .5);
+  background: rgba(45, 212, 191, .07);
+}
+.handoff-editor .ke-hint::before { content: "⇄ "; color: #2dd4bf; }
+.handoff-editor select {
+  background: #0d1117;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 12px;
+  padding: 3px 6px;
+  max-width: 96px;
+}
+.handoff-editor select:focus { outline: none; border-color: #2dd4bf; }
+.handoff-editor input[type="number"] { width: 58px; }
+
+/* 交接结果行 */
+.hand-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-bottom: 1px solid rgba(42, 50, 61, .5);
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+}
+.hand-row:last-child { border-bottom: none; }
+.hand-row:hover { background: var(--bg-panel-2); }
+.hand-row.ok .pair-status b { color: #2dd4bf; font-weight: 600; }
+.hand-row.nowin .pair-status b,
+.hand-row.invalid .pair-status b { color: var(--text-dim); font-weight: 600; }
+.hand-row.active-now { background: rgba(45, 212, 191, .13); box-shadow: inset 3px 0 0 #2dd4bf; }
+.hand-segs { margin-top: 3px; color: var(--text-dim); }
+.hand-seg {
+  background: rgba(45, 212, 191, .08);
+  border: 1px solid rgba(45, 212, 191, .28);
+  color: rgba(158, 230, 220, .8);
+}
+.hand-win {
+  background: rgba(45, 212, 191, .22);
+  border: 1px solid rgba(45, 212, 191, .6);
+  color: #9ee6dc;
+  cursor: pointer;
+}
+.hand-win:hover { background: rgba(45, 212, 191, .34); }
+
+/* 时间轴交接条：淡底＝可行区间，青绿实条＝起始时窗 */
+.tl-handoff-seg, .tl-handoff-win {
+  position: absolute;
+  top: 3px;
+  height: 16px;
+  border-radius: 3px;
+}
+.tl-handoff-seg {
+  background: rgba(45, 212, 191, .10);
+  border-top: 1px dashed rgba(94, 234, 212, .45);
+  border-bottom: 1px dashed rgba(94, 234, 212, .45);
+  pointer-events: none;
+}
+.tl-handoff-win {
+  top: 4px;
+  height: 14px;
+  background: rgba(45, 212, 191, .42);
+  border: 1px solid rgba(94, 234, 212, .85);
+  cursor: pointer;
+  pointer-events: auto;
+  z-index: 2;
+}
+.tl-handoff-win:hover { background: rgba(45, 212, 191, .6); }
+
 /* 入场口令面板 */
 .panel-cues { font-variant-numeric: tabular-nums; }
 .cue-list { padding: 6px 10px; }

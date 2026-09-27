@@ -348,3 +348,138 @@ test('GET /api/sample：样例携带入场口令且分析结果为甲三态链�
   const yi = r.json.cueResults.find((e) => e.performerId === 'p2');
   assert.equal(yi.results[0].status, 'triggered');
 });
+
+// ---------- 道具交接 handoffs ----------
+
+test('POST /api/analyze：接受 handoffs 并返回 handoffResults（区间 + 起始时窗）', async () => {
+  const body = {
+    duration: 12,
+    performers: [
+      { id: 'a', name: '甲', radius: 5, keys: [{ t: 0, x: 0, y: 50 }, { t: 12, x: 100, y: 50 }] },
+      { id: 'b', name: '乙', radius: 5, keys: [{ t: 0, x: 100, y: 50 }, { t: 12, x: 0, y: 50 }] }
+    ],
+    handoffs: [
+      { name: '中央交接', aId: 'a', bId: 'b', x: 20, y: 20, width: 60, height: 60, reach: 20, minDuration: 1 }
+    ]
+  };
+  const r = await postAnalyze(body);
+  assert.equal(r.status, 200);
+  assert.ok(Array.isArray(r.json.handoffs));
+  assert.equal(r.json.handoffs.length, 1);
+  assert.equal(r.json.handoffResults.length, 1);
+  const h = r.json.handoffResults[0];
+  assert.equal(h.feasible, true);
+  assert.equal(h.aName, '甲');
+  assert.equal(h.bName, '乙');
+  assert.equal(h.intervals.length, 1);
+  assert.ok(Math.abs(h.intervals[0][0] - 4.8) < 1e-9);
+  assert.ok(Math.abs(h.intervals[0][1] - 7.2) < 1e-9);
+  assert.equal(h.windows.length, 1);
+  assert.ok(Math.abs(h.windows[0][0] - 4.8) < 1e-9);
+  assert.ok(Math.abs(h.windows[0][1] - 6.2) < 1e-9);
+  assert.ok(Math.abs(h.firstEntry - 4.8) < 1e-9);
+  assert.ok(Math.abs(h.lastExit - 7.2) < 1e-9);
+
+  // 规整后的 scene 中保留交接配置（缺省 id 补全）
+  assert.equal(r.json.scene.handoffs.length, 1);
+  const sh = r.json.scene.handoffs[0];
+  assert.ok(sh.id, '缺省 id 自动补全');
+  assert.equal(sh.name, '中央交接');
+  ['aId', 'bId', 'x', 'y', 'width', 'height', 'reach', 'minDuration'].forEach((f) => {
+    assert.ok(sh[f] !== undefined, `scene.handoffs[0].${f} 存在`);
+  });
+});
+
+test('POST /api/analyze：handoffs 缺省字段补默认（id/name、d=1），旧请求无 handoffs 兼容', async () => {
+  const body = {
+    duration: 10,
+    performers: [
+      { id: 'a', radius: 0, keys: [{ t: 0, x: 0, y: 50 }, { t: 10, x: 100, y: 50 }] },
+      { id: 'b', radius: 0, keys: [{ t: 0, x: 100, y: 50 }, { t: 10, x: 0, y: 50 }] }
+    ],
+    handoffs: [{ aId: 'a', bId: 'b', x: 20, y: 20, width: 60, height: 60, reach: 100 }]
+  };
+  const r = await postAnalyze(body);
+  assert.equal(r.status, 200);
+  const sh = r.json.scene.handoffs[0];
+  assert.equal(sh.minDuration, 1, '缺省最短持续为 1s');
+  assert.ok(sh.id);
+  assert.equal(sh.name, '交接 1');
+  // 触达 100 时整段同区（t∈[2,8]）即可交接：时窗 [2,7]
+  const hr = r.json.handoffResults[0];
+  assert.ok(Math.abs(hr.intervals[0][0] - 2) < 1e-9);
+  assert.ok(Math.abs(hr.intervals[0][1] - 8) < 1e-9);
+  assert.deepEqual(hr.windows, [[2, 7]]);
+
+  const old = await postAnalyze({
+    duration: 10,
+    performers: [
+      { name: 'a', radius: 10, keys: [{ t: 0, x: 0, y: 0 }] },
+      { name: 'b', radius: 10, keys: [{ t: 0, x: 50, y: 50 }] }
+    ]
+  });
+  assert.equal(old.status, 200);
+  assert.deepEqual(old.json.handoffs, []);
+  assert.deepEqual(old.json.handoffResults, []);
+  assert.deepEqual(old.json.scene.handoffs, []);
+});
+
+test('POST /api/analyze：非法 handoffs 返回 400（字段/类型/当事人/d>0）', async () => {
+  const base = {
+    duration: 10,
+    performers: [
+      { id: 'a', radius: 1, keys: [{ t: 0, x: 0, y: 0 }] },
+      { id: 'b', radius: 1, keys: [{ t: 0, x: 5, y: 5 }] }
+    ]
+  };
+  async function expect400(handoffs, re, label) {
+    const r = await postAnalyze(Object.assign({ handoffs: handoffs }, base));
+    assert.equal(r.status, 400, label);
+    assert.match(r.json.error, re, label);
+  }
+
+  await expect400({}, /handoffs 必须为数组/, 'handoffs 非数组');
+  await expect400(
+    [{ aId: 'a', bId: 'b', x: 0, y: 0, width: 1, height: 1, reach: 'x' }],
+    /reach 必须为有限数/, 'reach 非数字');
+  await expect400(
+    [{ aId: 'a', bId: 'b', x: 0, y: 0, width: -1, height: 1, reach: 1 }],
+    /width\/height 不能为负/, '负宽');
+  await expect400(
+    [{ aId: 'a', bId: 'b', x: 0, y: 0, width: 1, height: 1, reach: -2 }],
+    /触达距离.*不能为负/, '负触达');
+  await expect400(
+    [{ aId: 'a', bId: 'b', x: 0, y: 0, width: 1, height: 1, reach: 1, minDuration: 0 }],
+    /minDuration.*必须为正数/, 'd=0 必须拒绝');
+  await expect400(
+    [{ aId: 'a', bId: 'a', x: 0, y: 0, width: 1, height: 1, reach: 1 }],
+    /不能为同一人/, '同一人');
+  await expect400(
+    [{ aId: 'a', bId: 'zzz', x: 0, y: 0, width: 1, height: 1, reach: 1 }],
+    /不存在的表演者/, '悬空当事人');
+  await expect400(
+    [{ aId: 'a', x: 0, y: 0, width: 1, height: 1, reach: 1 }],
+    /必须指定两名表演者/, '缺少 bId');
+});
+
+test('GET /api/sample：样例携带交接配置，分析结果含中央交接时窗', async () => {
+  const s = await getJson('/api/sample');
+  assert.equal(s.status, 200);
+  assert.ok(Array.isArray(s.json.handoffs) && s.json.handoffs.length === 1);
+  const h0 = s.json.handoffs[0];
+  ['id', 'name', 'aId', 'bId', 'x', 'y', 'width', 'height', 'reach', 'minDuration']
+    .forEach((f) => assert.ok(h0[f] !== undefined));
+  const r = await postAnalyze({
+    duration: s.json.duration,
+    performers: s.json.performers,
+    obstacles: s.json.obstacles,
+    handoffs: s.json.handoffs
+  });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.handoffResults.length, 1);
+  const hr = r.json.handoffResults[0];
+  assert.equal(hr.feasible, true);
+  assert.equal(hr.windows.length, 1);
+  assert.ok(Math.abs(hr.windows[0][0] - 4.90909091) < 1e-6);
+  assert.ok(Math.abs(hr.windows[0][1] - 6.09090909) < 1e-6);
+});
