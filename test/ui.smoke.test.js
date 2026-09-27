@@ -799,3 +799,131 @@ test('入场口令：编辑走位即时重算状态，且随快照保存并在�
   assert.equal(doc.querySelectorAll('.cue-row').length, 1);
   dom.window.close();
 });
+
+// ---------- 道具交接 ----------
+
+test('道具交接：启动即渲染样例交接，区间与时窗芯片正确，点击时窗跳转播放头', async () => {
+  const dom = await boot();
+  const { window } = dom;
+  const doc = window.document;
+
+  // 样例自带 1 项交接（甲×乙、中央交接区、触达 80、持续 0.5s）
+  const rows = [...doc.querySelectorAll('.handoff-row')];
+  assert.equal(rows.length, 1);
+  const row = rows[0];
+  assert.ok(row.classList.contains('feasible'), '样例交接可行，行标记 feasible');
+
+  // 头部两个表演者下拉：甲 × 乙
+  const selects = row.querySelectorAll('.handoff-select');
+  assert.equal(selects.length, 2);
+  assert.equal(selects[0].value, 'p1');
+  assert.equal(selects[1].value, 'p2');
+
+  // 可交接区间 ≈[5.18,6.82]，起始时窗 ≈[5.18,6.32]（持续 0.5s）
+  const ivChip = row.querySelector('.handoff-iv-chip');
+  assert.ok(ivChip, '展示可交接区间芯片');
+  assert.match(ivChip.textContent, /5\.18–6\.82\s*s/);
+  const winChip = row.querySelector('.handoff-win-chip');
+  assert.ok(winChip, '展示起始时窗芯片');
+  assert.match(winChip.textContent, /5\.18–6\.32\s*s/);
+
+  // 点击时窗：播放头跳到时窗起点
+  const expected = Number(winChip.getAttribute('data-t'));
+  assert.ok(Math.abs(expected - 4560 / 880) < 1e-6, `时窗起点应≈5.1818，实际 ${expected}`);
+  winChip.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  const tv = Number(doc.getElementById('time-input').value);
+  assert.ok(Math.abs(tv - 5.18) < 0.01, `播放头应跳到 5.18，实际 ${tv}`);
+  dom.window.close();
+});
+
+test('道具交接：新增交接、编辑交接区即时重算、删除', async () => {
+  const dom = await boot();
+  const { window } = dom;
+  const doc = window.document;
+
+  // 初始 1 行（样例）；新增后 2 行：默认 甲×乙、交接区在两人当前圆心中点
+  doc.getElementById('btn-handoff-add').click();
+  await new Promise((r) => setTimeout(r, 5));
+  let rows = [...doc.querySelectorAll('.handoff-row')];
+  assert.equal(rows.length, 2);
+  const newRow = rows[1];
+  const selects = newRow.querySelectorAll('.handoff-select');
+  assert.equal(selects[0].value, 'p1', '默认甲方为当前选中者');
+  assert.equal(selects[1].value, 'p2', '默认乙方为下一名表演者');
+  // 默认交接区在两人 t=0 圆心中点 (280,170) 附近，两人均不在内 -> 无满足区间
+  assert.match(newRow.querySelector('.handoff-result').textContent, /全程不同时满足/);
+
+  // 编辑交接区到中央 (440,240)：立即重算，出现可交接区间与起始时窗
+  function rowInputs(row) {
+    return [...row.querySelectorAll('input[type="number"]')];
+  }
+  // 输入顺序：x, y, 宽, 高, 触达, 持续
+  rowInputs(newRow)[0].value = '440';
+  rowInputs(newRow)[0].dispatchEvent(new window.Event('change', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 5));
+  const yInput = rowInputs(doc.querySelectorAll('.handoff-row')[1])[1];
+  yInput.value = '240';
+  yInput.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 5));
+
+  const updated = doc.querySelectorAll('.handoff-row')[1];
+  assert.match(updated.querySelector('.handoff-result').textContent, /可交接区间/);
+  assert.ok(updated.querySelector('.handoff-win-chip'), '编辑参数后即时给出起始时窗');
+
+  // 删除新增行，回到样例的 1 行
+  updated.querySelector('.handoff-del').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 5));
+  rows = [...doc.querySelectorAll('.handoff-row')];
+  assert.equal(rows.length, 1);
+  assert.ok(rows[0].querySelector('.handoff-win-chip'), '样例交接不受影响');
+  dom.window.close();
+});
+
+test('道具交接：拖走位即时重算，且配置随快照保存并在载入时恢复', async () => {
+  const dom = await boot();
+  const { window } = dom;
+  const doc = window.document;
+  const canvas = doc.getElementById('stage');
+
+  function pointer(type, x, y) {
+    canvas.dispatchEvent(new window.MouseEvent(type, {
+      bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0
+    }));
+  }
+
+  // 初始：样例交接有起始时窗
+  assert.ok(doc.querySelector('.handoff-row .handoff-win-chip'));
+
+  // 拖动乙首帧 (500,40) -> (300,40)：乙不再经过中央交接区 -> 立即无满足区间
+  pointer('pointerdown', 500, 40);
+  pointer('pointermove', 300, 40);
+  pointer('pointerup', 300, 40);
+  await new Promise((r) => setTimeout(r, 10));
+  assert.match(doc.querySelector('.handoff-row .handoff-result').textContent, /全程不同时满足/);
+  assert.ok(!doc.querySelector('.handoff-row .handoff-win-chip'), '时窗芯片消失');
+
+  // 存快照：交接配置（甲×乙、触达 80、持续 0.5）随场景持久化
+  doc.getElementById('snap-name').value = '交接案';
+  doc.getElementById('btn-snap-save').click();
+  await new Promise((r) => setTimeout(r, 10));
+  const stored = JSON.parse(window.localStorage.getItem('trajectory-collision-stage.snapshots.v1'));
+  assert.equal(stored.list[0].scene.handoffs.length, 1);
+  const sh = stored.list[0].scene.handoffs[0];
+  assert.equal(sh.aId, 'p1');
+  assert.equal(sh.bId, 'p2');
+  assert.equal(sh.reach, 80);
+  assert.equal(sh.minDuration, 0.5);
+
+  // 重置样例：交接恢复为有时窗；再载入快照：恢复拖动后的"全程不同时满足"
+  doc.getElementById('btn-sample').click();
+  await new Promise((r) => setTimeout(r, 20));
+  assert.ok(doc.querySelector('.handoff-row .handoff-win-chip'), '重置样例后时窗恢复');
+
+  doc.querySelector('.snap-item .snap-load').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 10));
+  const rows = [...doc.querySelectorAll('.handoff-row')];
+  assert.equal(rows.length, 1, '载入快照后交接配置恢复');
+  assert.match(rows[0].querySelector('.handoff-result').textContent, /全程不同时满足/,
+    '载入恢复拖帧后的交接结果');
+  dom.window.close();
+});

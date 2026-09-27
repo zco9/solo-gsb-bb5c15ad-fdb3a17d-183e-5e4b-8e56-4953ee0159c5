@@ -251,6 +251,62 @@ html, body {
 }
 .cue-jump:hover { color: #7ee787; text-decoration-style: solid; }
 
+/* 道具交接面板 */
+.panel-handoffs { font-variant-numeric: tabular-nums; }
+.handoff-list { padding: 6px 10px; }
+.handoff-row {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 9px;
+  margin-bottom: 7px;
+  background: var(--bg-panel-2);
+  border-left-width: 3px;
+  border-left-color: #a78bfa;
+}
+.handoff-row.feasible { border-left-color: var(--ok); }
+.handoff-row-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 5px;
+}
+.handoff-select {
+  flex: 1;
+  min-width: 0;
+  background: #0d1117;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 12px;
+  padding: 3px 4px;
+}
+.handoff-select:focus { outline: none; border-color: #a78bfa; }
+.handoff-x { color: var(--text-dim); font-size: 12px; }
+.handoff-del { padding: 1px 7px; line-height: 1.4; }
+.handoff-del:hover { color: var(--danger); border-color: var(--danger); }
+.handoff-result { margin-top: 5px; font-size: 12px; color: var(--text-dim); }
+.handoff-result-line { margin-top: 2px; line-height: 1.7; }
+.handoff-warn { color: #e3b341; }
+.handoff-iv-chip {
+  background: rgba(167, 139, 250, .14);
+  border-color: rgba(167, 139, 250, .45);
+  color: #d8b4fe;
+}
+.handoff-win-chip {
+  display: inline-block;
+  font-size: 11px;
+  background: rgba(63, 185, 80, .14);
+  border: 1px solid rgba(63, 185, 80, .45);
+  color: #7ee787;
+  border-radius: 4px;
+  padding: 0 5px;
+  margin: 1px 4px 1px 0;
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+.handoff-win-chip:hover { background: rgba(63, 185, 80, .3); text-decoration-style: solid; }
+
 /* 播放控制 */
 .transport { display: flex; align-items: center; gap: 8px; }
 .time-readout { color: var(--text-dim); display: flex; align-items: center; gap: 4px; }

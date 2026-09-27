@@ -24,12 +24,14 @@ app.get('/api/sample', (_req, res) => {
 /**
  * 把入参场景规整为 API 出参形式：每个关键帧都带显式半径 r
  * （缺省继承的帧解析为表演者当前 radius），禁入矩形经坐标/尺寸规整，
+ * 交接配置经同一规整（缺省 id 补全、尺寸/触达钳非负、最短持续必须为正），
  * 便于集成方直接消费。
  */
-function resolveScene(duration, performers, obstacles) {
+function resolveScene(duration, performers, obstacles, handoffs) {
   return {
     duration: duration,
     obstacles: core.normalizeObstacles(obstacles),
+    handoffs: core.normalizeHandoffs(handoffs, duration),
     performers: performers.map((p) => {
       const base = Math.max(0, Number(p.radius) || 0);
       const ks = core.normalizeKeys(p.keys, base);
@@ -55,17 +57,23 @@ function resolveScene(duration, performers, obstacles) {
  * body: {
  *   duration,
  *   performers:[{name?,radius,keys:[{t,x,y,r?}],cues?:[{x,y,width,height,winStart,winEnd}]}],
- *   obstacles?:[{id?,name?,x,y,width,height}]   // 舞台禁入矩形（可空/缺省）
+ *   obstacles?:[{id?,name?,x,y,width,height}],   // 舞台禁入矩形（可空/缺省）
+ *   handoffs?:[{id?,aId,bId,x,y,width,height,reach,minDuration}]  // 道具交接（可空/缺省）
  * }
  * 关键帧 r 为可选安全半径（开伞/展开道具），缺省继承表演者 radius。
  * cues 为按顺序排列的入场口令（入口矩形 + 允许进入时窗，时窗缺省为
  * [0,duration]），引擎按圆心从矩形外严格进入的时刻核对，返回
  * cueResults（triggered/missed/blocked）。
+ * handoffs 为道具交接配置：aId/bId 引用表演者 id，交接区为轴对齐矩形，
+ * reach 为最大圆心触达距离，minDuration(d>0) 为最短持续秒数；返回
+ * handoffResults——两人圆心同时严格位于交接区内部且间距≤reach 的
+ * 连续区间（贴边停留与仅瞬时触达不计），以及每段满足 b-a≥d 时给出的
+ * 起始时窗 [a, b-d]。
  * 每对返回精确碰撞区间与最小安全余量 minMargin/minMarginT
  * （distance(t)-(rA+rB) 的连续全局最小值及发生时刻），pairs 按余量升序；
  * obstacleConflicts 为每位表演者 × 每个禁入矩形的精确侵入区间，按首次
  * 进入时刻升序；场景级另附 minMargin/minMarginT/minMarginPair 与
- * firstObstacleEntry/firstObstacleConflict。旧请求（无 obstacles/cues）完全兼容。
+ * firstObstacleEntry/firstObstacleConflict。旧请求（无 obstacles/cues/handoffs）完全兼容。
  */
 app.post('/api/analyze', (req, res) => {
   try {
@@ -73,6 +81,7 @@ app.post('/api/analyze', (req, res) => {
     const duration = Number(scene.duration);
     const performers = Array.isArray(scene.performers) ? scene.performers : [];
     const rawObstacles = scene.obstacles;
+    const rawHandoffs = scene.handoffs;
 
     if (!(duration > 0) || !isFinite(duration)) {
       return res.status(400).json({ error: 'duration 必须为正数（秒）' });
@@ -82,6 +91,9 @@ app.post('/api/analyze', (req, res) => {
     }
     if (rawObstacles !== undefined && rawObstacles !== null && !Array.isArray(rawObstacles)) {
       return res.status(400).json({ error: 'obstacles 必须为数组' });
+    }
+    if (rawHandoffs !== undefined && rawHandoffs !== null && !Array.isArray(rawHandoffs)) {
+      return res.status(400).json({ error: 'handoffs 必须为数组' });
     }
 
     performers.forEach((p, idx) => {
@@ -144,10 +156,43 @@ app.post('/api/analyze', (req, res) => {
       }
     });
 
+    // 道具交接入参校验（缺省/空数组直接跳过，保持旧请求兼容）；
+    // 缺省字段由引擎规整时丢弃/补全，这里仅对显式给出但非法的字段报 400
+    (rawHandoffs || []).forEach((h, idx) => {
+      if (!h || typeof h !== 'object') {
+        throw new Error(`第 ${idx + 1} 项交接格式非法`);
+      }
+      ['aId', 'bId'].forEach((f) => {
+        const v = h[f];
+        if (v !== undefined && v !== null && v !== '' &&
+            typeof v !== 'string' && typeof v !== 'number') {
+          throw new Error(`第 ${idx + 1} 项交接的 ${f} 必须为字符串`);
+        }
+      });
+      ['x', 'y', 'width', 'height', 'reach', 'minDuration'].forEach((f) => {
+        if (h[f] !== undefined && h[f] !== null && h[f] !== '' && !isFinite(Number(h[f]))) {
+          throw new Error(`第 ${idx + 1} 项交接的 ${f} 必须为数字`);
+        }
+      });
+      if (isFinite(Number(h.width)) && Number(h.width) < 0) {
+        throw new Error(`第 ${idx + 1} 项交接的 width 不能为负`);
+      }
+      if (isFinite(Number(h.height)) && Number(h.height) < 0) {
+        throw new Error(`第 ${idx + 1} 项交接的 height 不能为负`);
+      }
+      if (isFinite(Number(h.reach)) && Number(h.reach) < 0) {
+        throw new Error(`第 ${idx + 1} 项交接的 reach 不能为负`);
+      }
+      if (isFinite(Number(h.minDuration)) && Number(h.minDuration) <= 0) {
+        throw new Error(`第 ${idx + 1} 项交接的 minDuration 必须为正数`);
+      }
+    });
+
     const obstacles = core.normalizeObstacles(rawObstacles);
-    const result = core.analyzeScene({ duration, performers, obstacles });
+    const handoffs = core.normalizeHandoffs(rawHandoffs, duration);
+    const result = core.analyzeScene({ duration, performers, obstacles, handoffs });
     res.json(Object.assign(
-      { scene: resolveScene(duration, performers, obstacles) },
+      { scene: resolveScene(duration, performers, obstacles, handoffs) },
       result
     ));
   } catch (err) {

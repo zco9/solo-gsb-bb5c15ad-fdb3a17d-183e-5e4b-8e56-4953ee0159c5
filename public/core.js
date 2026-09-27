@@ -65,6 +65,22 @@
  * 之后按口令顺序贪心匹配时窗内严格递增、且不与同矩形前一口令共用同一次
  * 停留的最早进入时刻；未触发项分别记为"错过时窗"（missed）与
  * "前序未完成"（blocked）。
+ *
+ * ---------- 道具交接时窗（handoffs） ----------
+ *
+ * 场景可携带若干交接配置 handoffs：
+ *   { id, aId, bId, x, y, width, height, reach, minDuration }
+ * 一项交接表示：两名表演者的**圆心**同时严格位于轴对齐交接区内部
+ * （与入场口令同一开区间判定，贴边停留不计），且圆心间距不超过触达距离
+ * reach 的连续时间段，即为可交接区间；跨关键帧相接的区间合并为一段，
+ * 端点取进入/离开的极限时刻，仅瞬时触达（零长度区间）不计。每段
+ * [a,b] 若 b-a ≥ minDuration（d>0），给出起始时窗 [a, b-d]：交接开始
+ * 时刻落在该时窗内，即可在区间内完成一次持续 d 秒的交接。
+ *
+ * 求法：分别对两人求圆心停留区间（复用入场口令的开区间逻辑与合并），
+ * 取交集窗；窗内两人相对位置仍是分段一次函数，|u+vt|² ≤ reach² 是首项
+ * 系数非负的二次不等式，复用 solveQuadraticLE 精确求解；全部子区间经
+ * mergeIntervals 合并。全程解析，不做任何离散帧抽样。
  */
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) {
@@ -480,6 +496,8 @@
    * 另附场景级首次侵入 firstObstacleEntry 及其当事人/禁入区。
    * cueResults 为每位携带入场口令的表演者一条有序触发核对结果
    * （triggered / missed / blocked）。
+   * handoffs 为规整后的交接配置，handoffResults 每项给出两人同处
+   * 交接区且间距≤触达距离的连续区间与起始时窗。
    */
   function analyzeScene(scene) {
     var duration = Number(scene.duration);
@@ -551,6 +569,18 @@
       }
     });
 
+    // 道具交接：每项配置一条可交接区间与起始时窗结果
+    var handoffs = normalizeHandoffs(scene.handoffs, duration);
+    var handoffResults = handoffs.map(function (h) {
+      var pa = null;
+      var pb = null;
+      for (var pi = 0; pi < ps.length; pi++) {
+        if (pa === null && String(ps[pi].id) === h.aId) pa = ps[pi];
+        if (pb === null && String(ps[pi].id) === h.bId) pb = ps[pi];
+      }
+      return analyzeHandoff(h, pa, pb, duration);
+    });
+
     return {
       duration: duration,
       pairCount: pairs.length,
@@ -558,6 +588,8 @@
       obstacles: obstacles,
       obstacleConflicts: obstacleConflicts,
       cueResults: cueResults,
+      handoffs: handoffs,
+      handoffResults: handoffResults,
       firstObstacleEntry: firstObstacle ? firstObstacle.firstEntry : null,
       firstObstacleConflict: firstObstacle
         ? [firstObstacle.performerId, firstObstacle.obstacleId]
@@ -821,25 +853,11 @@
   }
 
   /**
-   * 对分段直线圆心轨迹求进入某轴对齐矩形内部的全部时刻（严格进入）。
+   * 对已展开的活动段求圆心严格位于矩形 (X0,Y0)-(X1,Y1) 内部的停留区间：
    * 每段取 x、y 两个坐标开区间的交（矩形内部 = 两开区间之交），再把跨
-   * 关键帧相接的停留合并；每个合并停留段的起点即一个进入时刻：
-   *   - 首段 t0=0 已在内部 → 进入时刻 0；
-   *   - 仅在边界/角点相切（无内部长度）→ 无结果；
-   *   - 退化矩形（width=0 或 height=0）无内部 → 无结果。
-   * 返回严格递增的时刻数组。
+   * 关键帧相接的停留合并。端点为穿越边界的极限时刻。
    */
-  function rectangleEntryTimes(performer, cue, duration) {
-    var durationNum = Number(duration);
-    if (!(durationNum > 0)) throw new Error('duration 必须为正数');
-    var X0 = cue.x;
-    var Y0 = cue.y;
-    var X1 = cue.x + cue.width;
-    var Y1 = cue.y + cue.height;
-    if (!(X1 > X0) || !(Y1 > Y0)) return []; // 退化矩形没有内部
-
-    var baseR = Math.max(0, Number(performer.radius) || 0);
-    var segs = buildSegments(performer.keys, durationNum, baseR);
+  function stayIntervalsFromSegments(segs, X0, Y0, X1, Y1) {
     var raw = [];
     segs.forEach(function (s) {
       var ix = axisOpenInterval(s.x0, s.vx, X0, X1, s.t0, s.t1);
@@ -850,11 +868,40 @@
       var hi = Math.min(ix[1], iy[1]);
       if (hi > lo + EPS) raw.push([lo, hi]);
     });
+    return mergeIntervals(raw);
+  }
 
-    // 跨关键帧相接（含恰在边界点两侧）的停留合并为同一次停留
-    var stays = mergeIntervals(raw);
-    return stays.map(function (iv) {
-      return clamp(iv[0], 0, durationNum);
+  /**
+   * 对分段直线圆心轨迹求严格位于某轴对齐矩形内部的全部停留区间
+   * （[[a,b], ...]，已合并跨关键帧相接的停留）：
+   *   - 首段 t0=0 已在内部 → 首个停留段以 0 开始；
+   *   - 仅在边界/角点相切（无内部长度）→ 无结果；
+   *   - 退化矩形（width=0 或 height=0）无内部 → 无结果。
+   */
+  function rectangleStayIntervals(performer, rect, duration) {
+    var durationNum = Number(duration);
+    if (!(durationNum > 0)) throw new Error('duration 必须为正数');
+    var X0 = rect.x;
+    var Y0 = rect.y;
+    var X1 = rect.x + rect.width;
+    var Y1 = rect.y + rect.height;
+    if (!(X1 > X0) || !(Y1 > Y0)) return []; // 退化矩形没有内部
+
+    var baseR = Math.max(0, Number(performer.radius) || 0);
+    var segs = buildSegments(performer.keys, durationNum, baseR);
+    return stayIntervalsFromSegments(segs, X0, Y0, X1, Y1).map(function (iv) {
+      return [clamp(iv[0], 0, durationNum), clamp(iv[1], 0, durationNum)];
+    });
+  }
+
+  /**
+   * 对分段直线圆心轨迹求进入某轴对齐矩形内部的全部时刻（严格进入）。
+   * 每个合并停留段的起点即一个进入时刻（语义详见 rectangleStayIntervals）。
+   * 返回严格递增的时刻数组。
+   */
+  function rectangleEntryTimes(performer, cue, duration) {
+    return rectangleStayIntervals(performer, cue, duration).map(function (iv) {
+      return iv[0];
     });
   }
 
@@ -908,6 +955,192 @@
 
       return { index: i, cue: cue, status: status, triggerT: triggerT, entries: entries };
     });
+  }
+
+  // ---------- 道具交接时窗（handoffs） ----------
+  //
+  // 每项交接配置 { id, aId, bId, x, y, width, height, reach, minDuration }：
+  // 两名表演者的圆心同时严格位于轴对齐交接区内部（开区间判定，贴边停留
+  // 不计），且圆心间距 ≤ reach 的连续时间段即为可交接区间；跨关键帧相接
+  // 的区间合并为一段，端点取进入/离开的极限时刻，仅瞬时触达（零长度
+  // 区间）不计。每段 [a,b] 若 b-a ≥ minDuration（d>0），给出起始时窗
+  // [a, b-d]。
+
+  var HANDOFF_ID_PREFIX = 'h';
+  var HANDOFF_EPS = 1e-7; // 最短持续秒数判定容差（秒）
+
+  function nextHandoffId(existing) {
+    var used = {};
+    (existing || []).forEach(function (h) { used[h.id] = true; });
+    var id;
+    do {
+      id = HANDOFF_ID_PREFIX + Math.random().toString(36).slice(2, 8);
+    } while (used[id]);
+    return id;
+  }
+
+  /**
+   * 规整交接配置：aId/bId 必须为非空字符串（数字自动转字符串），缺省
+   * id 自动生成；坐标/尺寸/触达距离解析为有限数，width/height/reach 钳
+   * 为非负（0 宽/高的退化交接区没有内部，永不满足）；最短持续秒数
+   * minDuration 必须为正有限数，否则该项被丢弃。返回顺序与入参一致。
+   */
+  function normalizeHandoffs(handoffs, duration) {
+    var T = Number(duration);
+    if (!(T > 0)) throw new Error('duration 必须为正数');
+    var list = Array.isArray(handoffs) ? handoffs : [];
+    var out = [];
+    list.forEach(function (raw) {
+      if (!raw || typeof raw !== 'object') return;
+      var aId = (raw.aId === null || raw.aId === undefined) ? '' : String(raw.aId);
+      var bId = (raw.bId === null || raw.bId === undefined) ? '' : String(raw.bId);
+      if (!aId || !bId) return; // 必须指定两名表演者
+      var x = Number(raw.x);
+      var y = Number(raw.y);
+      var w = Number(raw.width);
+      var h = Number(raw.height);
+      var reach = Number(raw.reach);
+      var d = Number(raw.minDuration);
+      if (![x, y, w, h, reach, d].every(isFinite)) return;
+      if (!(d > 0)) return; // 最短持续秒数必须为正
+      var id = (raw.id === null || raw.id === undefined || raw.id === '')
+        ? nextHandoffId(out)
+        : String(raw.id);
+      out.push({
+        id: id,
+        aId: aId,
+        bId: bId,
+        x: x,
+        y: y,
+        width: Math.max(0, w),
+        height: Math.max(0, h),
+        reach: Math.max(0, reach),
+        minDuration: d
+      });
+    });
+    return out;
+  }
+
+  /** 两个已排序、互不重叠的区间列表的交集（升序）。 */
+  function intersectIntervalLists(listA, listB) {
+    var out = [];
+    var i = 0;
+    var j = 0;
+    while (i < listA.length && j < listB.length) {
+      var lo = Math.max(listA[i][0], listB[j][0]);
+      var hi = Math.min(listA[i][1], listB[j][1]);
+      if (hi > lo + EPS) out.push([lo, hi]);
+      if (listA[i][1] < listB[j][1]) i++;
+      else j++;
+    }
+    return out;
+  }
+
+  /**
+   * 计算一项交接：两人圆心同时严格位于交接区内部且间距 ≤ reach 的
+   * 连续区间，以及满足最短持续 minDuration 的起始时窗。
+   * handoff 为 normalizeHandoffs 规整后的配置；pa/pb 为按 aId/bId 解析
+   * 出的表演者对象（缺失或 aId===bId 时 valid=false，结果为空）。
+   * 返回 {
+   *   handoffId, handoff, aId, bId, aName, bName, valid,
+   *   intervals: [[a,b],...],  // 可交接区间（已合并、已去零长度）
+   *   windows: [[s,e],...],    // 起始时窗 [a, b-d]（仅 b-a≥d 的段）
+   *   feasible                 // windows 是否非空
+   * }
+   */
+  function analyzeHandoff(handoff, pa, pb, duration) {
+    var durationNum = Number(duration);
+    if (!(durationNum > 0)) throw new Error('duration 必须为正数');
+    var valid = !!pa && !!pb && handoff.aId !== handoff.bId;
+    var result = {
+      handoffId: handoff.id,
+      handoff: handoff,
+      aId: handoff.aId,
+      bId: handoff.bId,
+      aName: pa ? (pa.name || pa.id) : handoff.aId,
+      bName: pb ? (pb.name || pb.id) : handoff.bId,
+      valid: valid,
+      intervals: [],
+      windows: [],
+      feasible: false
+    };
+    if (!valid) return result;
+
+    var X0 = handoff.x;
+    var Y0 = handoff.y;
+    var X1 = handoff.x + handoff.width;
+    var Y1 = handoff.y + handoff.height;
+    if (!(X1 > X0) || !(Y1 > Y0)) return result; // 退化交接区没有内部
+
+    var segsA = buildSegments(pa.keys, durationNum, Math.max(0, Number(pa.radius) || 0));
+    var segsB = buildSegments(pb.keys, durationNum, Math.max(0, Number(pb.radius) || 0));
+    // 两人各自圆心严格位于交接区内部的停留区间，取交集窗
+    var overlaps = intersectIntervalLists(
+      stayIntervalsFromSegments(segsA, X0, Y0, X1, Y1),
+      stayIntervalsFromSegments(segsB, X0, Y0, X1, Y1)
+    );
+
+    // 交集窗内两人相对位置仍是分段一次函数：|u+vt|² ≤ reach²
+    // （首项系数 |v|² ≥ 0，解集恒为单区间，复用同一求根器）
+    var reach = handoff.reach;
+    var raw = [];
+    overlaps.forEach(function (ov) {
+      var i = 0;
+      var j = 0;
+      while (i < segsA.length && j < segsB.length) {
+        var sa = segsA[i];
+        var sb = segsB[j];
+        var lo = Math.max(ov[0], sa.t0, sb.t0);
+        var hi = Math.min(ov[1], sa.t1, sb.t1);
+        if (hi - lo > EPS) {
+          var ux = sa.x0 - sb.x0;
+          var uy = sa.y0 - sb.y0;
+          var vx = sa.vx - sb.vx;
+          var vy = sa.vy - sb.vy;
+          var hits = solveQuadraticLE(
+            vx * vx + vy * vy,
+            2 * (ux * vx + uy * vy),
+            ux * ux + uy * uy - reach * reach,
+            lo, hi
+          );
+          for (var k = 0; k < hits.length; k++) {
+            hits[k][0] = clamp(hits[k][0], lo, hi);
+            hits[k][1] = clamp(hits[k][1], lo, hi);
+            raw.push(hits[k]);
+          }
+        }
+        if (sa.t1 < sb.t1 - EPS) i++;
+        else if (sb.t1 < sa.t1 - EPS) j++;
+        else { i++; j++; }
+      }
+    });
+
+    // 合并跨关键帧相接区间；仅瞬时触达（零长度）不计
+    var intervals = mergeIntervals(raw).filter(function (iv) {
+      return iv[1] - iv[0] > EPS;
+    });
+    var d = handoff.minDuration;
+    var windows = [];
+    intervals.forEach(function (iv) {
+      if (iv[1] - iv[0] >= d - HANDOFF_EPS) {
+        windows.push([iv[0], Math.max(iv[0], iv[1] - d)]);
+      }
+    });
+
+    result.intervals = intervals;
+    result.windows = windows;
+    result.feasible = windows.length > 0;
+    return result;
+  }
+
+  /** 查询时刻 t 是否处于某交接结果的可交接区间内（供画布高亮）。 */
+  function isHandoffActive(result, t) {
+    if (!result || !result.intervals) return false;
+    for (var i = 0; i < result.intervals.length; i++) {
+      var iv = result.intervals[i];
+      if (t + EPS >= iv[0] && t - EPS <= iv[1]) return true;
+    }
+    return false;
   }
 
   // ---------- 方案快照：两场景对比 ----------
@@ -1198,6 +1431,9 @@
    *  - 另附**入场口令**样例：甲对中央入口矩形有三条连续口令（t≈5.18 触发、
    *    错过 6～8s 时窗、第三项前序未完成），乙有一条 4.5～5s 时窗口令
    *    （t≈4.62 触发）；口令核对只看圆心，沿边擦边不计。
+   *  - 另附一项**道具交接**：甲×乙、中央交接区（与禁入区同框，语义不同），
+   *    触达距离 80、最短持续 0.5s；两人圆心同时严格在区内且间距≤80 的
+   *    区间约为 [5.18, 6.82]，给出起始时窗 [5.18, 6.32]。
    */
   function builtinScene() {
     return {
@@ -1205,6 +1441,19 @@
       world: { width: 1000, height: 600 },
       obstacles: [
         { id: 'o1', name: '中央禁入区', x: 440, y: 240, width: 120, height: 120 }
+      ],
+      handoffs: [
+        {
+          id: 'h1',
+          aId: 'p1',
+          bId: 'p2',
+          x: 440,
+          y: 240,
+          width: 120,
+          height: 120,
+          reach: 80,
+          minDuration: 0.5
+        }
       ],
       performers: [
         {
@@ -1277,7 +1526,11 @@
     isPerformerInObstacle: isPerformerInObstacle,
     normalizeCues: normalizeCues,
     rectangleEntryTimes: rectangleEntryTimes,
+    rectangleStayIntervals: rectangleStayIntervals,
     evaluateCues: evaluateCues,
+    normalizeHandoffs: normalizeHandoffs,
+    analyzeHandoff: analyzeHandoff,
+    isHandoffActive: isHandoffActive,
     compareScenes: compareScenes,
     builtinScene: builtinScene
   };
